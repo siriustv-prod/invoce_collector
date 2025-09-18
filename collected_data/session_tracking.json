@@ -1,0 +1,20 @@
+{
+  "37721e0e-5bdb-4a99-96ac-3853083e434c": {
+    "session_id": "37721e0e-5bdb-4a99-96ac-3853083e434c",
+    "timestamp": "2025-09-19T01:32:43.145813",
+    "status": "completed",
+    "invoices_collected": 7,
+    "pages_processed": 1,
+    "final_invoice_count": 7,
+    "completion_timestamp": "2025-09-19T01:32:49.899093"
+  },
+  "3d3b9974-6a4c-4aca-ac82-551adef651f6": {
+    "session_id": "3d3b9974-6a4c-4aca-ac82-551adef651f6",
+    "timestamp": "2025-09-19T01:41:05.691988",
+    "status": "completed",
+    "invoices_collected": 7,
+    "pages_processed": 1,
+    "final_invoice_count": 7,
+    "completion_timestamp": "2025-09-19T01:41:12.664852"
+  }
+}

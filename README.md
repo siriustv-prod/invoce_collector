@@ -1,6 +1,5 @@
 # Zoho Books Paid Invoice Collector
 
-## Overview
 Automated script that collects **Paid** and **Partially Paid** invoices from [Zoho Books Demo Company](https://www.zoho.com/books/accounting-software-demo/#/home/dashboard) and exports to CSV. Uses Playwright for web automation without API dependencies.
 
 ## Demo
@@ -14,7 +13,6 @@ Automated script that collects **Paid** and **Partially Paid** invoices from [Zo
 
 ## Installation & Setup
 ```bash
-cd respaid_test
 python -m venv venv
 
 # Windows:
@@ -31,18 +29,24 @@ playwright install chromium
 python zoho_paid_invoce_collector_script.py
 ```
 
-Script process:
-1. Opens Zoho Books Demo
-2. Navigates to invoices automatically
-3. Collects Paid/Partially Paid invoices across pages
-4. Saves to `collected_data/invoices.csv`
-5. Displays results and pauses
+**Process:** Opens Zoho Books Demo → Navigates to invoices → Collects Paid/Partially Paid invoices across pages → Saves to `collected_data/invoices.csv`
 
 ## Features
-- Smart pagination across all pages
-- Accurate filtering for Paid/Partially Paid status
-- Complete data extraction
+- Smart pagination and accurate filtering
+- **Retry mechanism** with exponential backoff for 429/5xx errors  
+- **Idempotency key** session tracking for operation transparency
 - Robust error handling
+
+## Testing
+```bash
+# Run tests
+pytest tests/ -v
+
+# Test specific functionality
+pytest tests/test_retry_and_idempotency.py -v
+```
+
+**Test Coverage:** Retry mechanism, idempotency keys, session lifecycle, safe operations, integration behavior
 
 ## CSV Output
 ```csv

@@ -50,3 +50,8 @@ Send:
 
 We reply within 2 business days.  Paid exercise — $50 total for this 2‑hour challenge.
 
+
+# Follow-up (Just a light touch—no need to overbuild)
+
+- add a tiny idempotency key + retry (429/5xx) around the core endpoint 
+- a 1-test pytest proving the behavior
