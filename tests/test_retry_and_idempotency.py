@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pytest test suite proving retry mechanism and idempotency key behavior
+Pytest test suite proving retry mechanism and tiny idempotency key behavior
 for the Zoho Books Invoice Collector.
 """
 
@@ -11,21 +11,23 @@ import json
 import tempfile
 import time
 from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime
+from pathlib import Path
 
 # Add parent directory to path to import our module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from zoho_paid_invoce_collector_script import (
     exponential_backoff_retry,
-    generate_session_id,
-    load_session_tracking,
-    save_session_tracking,
-    check_session_completed,
+    get_csv_filename,
+    _idem_load,
+    _idem_save,
+    maybe_replay,
+    record_result,
     safe_goto,
     safe_wait_for_selector,
     safe_click,
-    IDEMPOTENCY_FILE
+    IDEM_FILE,
+    IDEM_TTL_SECONDS
 )
 
 
@@ -139,122 +141,135 @@ class TestRetryMechanism:
         assert delay2 > delay1 * 0.8, "Second delay should be larger than first"
 
 
-class TestIdempotencyKey:
-    """Test the idempotency key and session tracking functionality."""
+class TestTinyIdempotency:
+    """Test the tiny idempotency key functionality."""
+    
+    def test_csv_filename_generation(self):
+        """Test CSV filename generation based on idempotency key."""
+        # No key - default filename
+        assert get_csv_filename(None) == "collected_data/invoices.csv"
+        assert get_csv_filename("") == "collected_data/invoices.csv"
+        
+        # With key - key-specific filename
+        assert get_csv_filename("daily-run-2025-09-18") == "collected_data/invoices_daily-run-2025-09-18.csv"
+        assert get_csv_filename("weekly-report") == "collected_data/invoices_weekly-report.csv"
+        
+        # Special characters should be sanitized
+        assert get_csv_filename("test/key:with*special?chars") == "collected_data/invoices_test_key_with_special_chars.csv"
+        assert get_csv_filename("key with spaces") == "collected_data/invoices_key_with_spaces.csv"
     
     def setup_method(self):
         """Set up test environment with temporary files."""
         self.temp_dir = tempfile.mkdtemp()
-        self.temp_idempotency_file = os.path.join(self.temp_dir, "test_session_tracking.json")
+        self.temp_idem_file = os.path.join(self.temp_dir, ".idem_cache.json")
         
-        # Patch the IDEMPOTENCY_FILE constant for testing
-        self.idempotency_patcher = patch('zoho_paid_invoce_collector_script.IDEMPOTENCY_FILE', 
-                                       self.temp_idempotency_file)
-        self.idempotency_patcher.start()
+        # Patch the IDEM_FILE constant for testing
+        self.idem_patcher = patch('zoho_paid_invoce_collector_script.IDEM_FILE', 
+                                 self.temp_idem_file)
+        self.idem_patcher.start()
     
     def teardown_method(self):
         """Clean up test environment."""
-        self.idempotency_patcher.stop()
+        self.idem_patcher.stop()
         # Clean up temp files
-        if os.path.exists(self.temp_idempotency_file):
-            os.remove(self.temp_idempotency_file)
+        if os.path.exists(self.temp_idem_file):
+            os.remove(self.temp_idem_file)
         os.rmdir(self.temp_dir)
     
-    def test_session_id_generation(self):
-        """Test that session IDs are unique and properly formatted."""
-        session_id1 = generate_session_id()
-        session_id2 = generate_session_id()
+    def test_replay_round_trip(self):
+        """Test complete idempotency round trip: record → replay → expire."""
+        key = "test-key-123"
         
-        # Should be different
-        assert session_id1 != session_id2
+        # Initially no replay available
+        assert maybe_replay(key) is None
         
-        # Should be valid UUID format (36 characters with hyphens)
-        assert len(session_id1) == 36
-        assert session_id1.count('-') == 4
+        # Record a result
+        summary = {"rows": 5, "csv": "collected_data/invoices_test-key-123.csv"}
+        record_result(key, summary)
         
-        # Should be strings
-        assert isinstance(session_id1, str)
-        assert isinstance(session_id2, str)
+        # Should replay the same result
+        replayed = maybe_replay(key)
+        assert replayed == summary
+        
+        # Expire the entry by manipulating timestamp
+        data = _idem_load()
+        data[key]["ts"] = time.time() - (IDEM_TTL_SECONDS + 1)
+        _idem_save(data)
+        
+        # Should no longer replay
+        assert maybe_replay(key) is None
     
-    def test_session_tracking_save_and_load(self):
-        """Test saving and loading session tracking data."""
-        session_id = generate_session_id()
+    def test_no_key_behavior(self):
+        """Test behavior when no idempotency key is provided."""
+        # Should return None for all operations
+        assert maybe_replay(None) is None
+        assert maybe_replay("") is None
         
+        # Recording with no key should be no-op
+        record_result(None, {"test": "data"})
+        record_result("", {"test": "data"})
+        
+        # File should not be created
+        assert not os.path.exists(self.temp_idem_file)
+    
+    def test_multiple_keys(self):
+        """Test that different keys are handled independently."""
+        key1 = "daily-run-2025-09-18"
+        key2 = "weekly-report-2025-09-18"
+        
+        summary1 = {"rows": 10, "csv": "collected_data/invoices_daily-run-2025-09-18.csv"}
+        summary2 = {"rows": 50, "csv": "collected_data/invoices_weekly-report-2025-09-18.csv"}
+        
+        # Record different results for different keys
+        record_result(key1, summary1)
+        record_result(key2, summary2)
+        
+        # Each key should replay its own result
+        assert maybe_replay(key1) == summary1
+        assert maybe_replay(key2) == summary2
+        
+        # Non-existent key should return None
+        assert maybe_replay("non-existent") is None
+    
+    def test_cache_file_operations(self):
+        """Test low-level cache file operations."""
+        # Test empty cache
+        data = _idem_load()
+        assert data == {}
+        
+        # Test saving and loading
         test_data = {
-            session_id: {
-                'session_id': session_id,
-                'timestamp': datetime.now().isoformat(),
-                'status': 'completed',
-                'invoices_collected': 42,
-                'pages_processed': 3
-            }
+            "key1": {"ts": time.time(), "summary": {"rows": 1}},
+            "key2": {"ts": time.time(), "summary": {"rows": 2}}
         }
-        
-        # Save data
-        save_session_tracking(test_data)
+        _idem_save(test_data)
         
         # Verify file exists
-        assert os.path.exists(self.temp_idempotency_file)
+        assert os.path.exists(self.temp_idem_file)
         
-        # Load data back
-        loaded_data = load_session_tracking()
-        
-        assert session_id in loaded_data
-        assert loaded_data[session_id]['status'] == 'completed'
-        assert loaded_data[session_id]['invoices_collected'] == 42
-        assert loaded_data[session_id]['pages_processed'] == 3
+        # Load and verify
+        loaded = _idem_load()
+        assert "key1" in loaded
+        assert "key2" in loaded
+        assert loaded["key1"]["summary"]["rows"] == 1
+        assert loaded["key2"]["summary"]["rows"] == 2
     
-    def test_session_completion_check(self):
-        """Test checking if a session was completed."""
-        session_id = generate_session_id()
-        
-        # Initially should not be completed
-        assert check_session_completed(session_id) == False
-        
-        # Save completed session
-        test_data = {
-            session_id: {
-                'session_id': session_id,
-                'status': 'completed',
-                'timestamp': datetime.now().isoformat()
-            }
-        }
-        save_session_tracking(test_data)
-        
-        # Now should be completed
-        assert check_session_completed(session_id) == True
-        
-        # Test with failed session
-        failed_session_id = generate_session_id()
-        test_data[failed_session_id] = {
-            'session_id': failed_session_id,
-            'status': 'failed',
-            'timestamp': datetime.now().isoformat()
-        }
-        save_session_tracking(test_data)
-        
-        # Failed session should not be considered completed
-        assert check_session_completed(failed_session_id) == False
-    
-    def test_load_empty_or_missing_file(self):
-        """Test loading when file doesn't exist or is empty."""
-        # File doesn't exist
-        loaded_data = load_session_tracking()
-        assert loaded_data == {}
-        
-        # Create empty file
-        with open(self.temp_idempotency_file, 'w') as f:
-            f.write("")
-        
-        loaded_data = load_session_tracking()
-        assert loaded_data == {}
-        
-        # Create invalid JSON file
-        with open(self.temp_idempotency_file, 'w') as f:
+    def test_corrupted_cache_file(self):
+        """Test handling of corrupted cache file."""
+        # Create corrupted JSON file
+        with open(self.temp_idem_file, 'w') as f:
             f.write("invalid json content")
         
-        loaded_data = load_session_tracking()
-        assert loaded_data == {}
+        # Should return empty dict instead of crashing
+        data = _idem_load()
+        assert data == {}
+        
+        # Should be able to save new data
+        record_result("test-key", {"rows": 1})
+        
+        # Should be able to replay
+        replayed = maybe_replay("test-key")
+        assert replayed == {"rows": 1}
 
 
 class TestSafeOperations:
@@ -318,111 +333,98 @@ class TestSafeOperations:
 
 
 class TestIntegrationBehavior:
-    """Integration test proving the complete retry + idempotency behavior."""
+    """Integration test proving the complete retry + tiny idempotency behavior."""
     
     def setup_method(self):
         """Set up test environment."""
         self.temp_dir = tempfile.mkdtemp()
-        self.temp_idempotency_file = os.path.join(self.temp_dir, "integration_test_tracking.json")
+        self.temp_idem_file = os.path.join(self.temp_dir, ".idem_cache.json")
         
-        # Patch the IDEMPOTENCY_FILE constant
-        self.idempotency_patcher = patch('zoho_paid_invoce_collector_script.IDEMPOTENCY_FILE', 
-                                       self.temp_idempotency_file)
-        self.idempotency_patcher.start()
+        # Patch the IDEM_FILE constant
+        self.idem_patcher = patch('zoho_paid_invoce_collector_script.IDEM_FILE', 
+                                 self.temp_idem_file)
+        self.idem_patcher.start()
     
     def teardown_method(self):
         """Clean up test environment."""
-        self.idempotency_patcher.stop()
-        if os.path.exists(self.temp_idempotency_file):
-            os.remove(self.temp_idempotency_file)
+        self.idem_patcher.stop()
+        if os.path.exists(self.temp_idem_file):
+            os.remove(self.temp_idem_file)
         os.rmdir(self.temp_dir)
     
-    def test_complete_session_lifecycle_with_retries(self):
+    def test_complete_job_lifecycle_with_idempotency(self):
         """
         Integration test proving the complete behavior:
-        1. Session ID generation and tracking
-        2. Retry mechanism on failures
-        3. Session completion tracking
-        4. Idempotency verification
+        1. Job runs fresh when no idempotency key cached
+        2. Retry mechanism works during job execution
+        3. Result is cached after successful completion
+        4. Subsequent runs with same key replay cached result
+        5. Expired cache entries are ignored
         """
-        # Simulate a function that fails twice then succeeds
+        # Simulate a scraping job that fails twice then succeeds
         operation_calls = []
         
         @exponential_backoff_retry(max_attempts=3, base_delay=0.01)
-        def simulated_scraping_operation(session_id, page_num):
-            operation_calls.append((session_id, page_num))
+        def simulated_scraping_job():
+            operation_calls.append(time.time())
             
             # Fail first two attempts with retryable errors
             if len(operation_calls) <= 2:
                 raise Exception("429 Rate limited - simulated failure")
             
             # Succeed on third attempt
-            return f"scraped_data_page_{page_num}"
+            return [
+                {"invoice_id": "INV001", "customer": "Test Corp", "amount": "$1000"},
+                {"invoice_id": "INV002", "customer": "Demo LLC", "amount": "$2000"}
+            ]
         
-        # 1. Generate session ID
-        session_id = generate_session_id()
-        assert session_id is not None
-        assert len(session_id) == 36  # UUID format
+        idem_key = "integration-test-2025-09-18"
         
-        # 2. Initialize session tracking
-        session_info = {
-            'session_id': session_id,
-            'timestamp': datetime.now().isoformat(),
-            'status': 'started',
-            'pages_processed': 0
-        }
+        # 1. First run - no cached result
+        assert maybe_replay(idem_key) is None
         
-        tracking_data = {session_id: session_info}
-        save_session_tracking(tracking_data)
+        # 2. Execute job with retries
+        invoices = simulated_scraping_job()
         
-        # Verify session was saved
-        loaded_data = load_session_tracking()
-        assert session_id in loaded_data
-        assert loaded_data[session_id]['status'] == 'started'
+        # Verify retry behavior
+        assert len(operation_calls) == 3  # Failed twice, succeeded third time
+        assert len(invoices) == 2
+        assert invoices[0]["invoice_id"] == "INV001"
         
-        # 3. Simulate scraping operation with retries
-        try:
-            result = simulated_scraping_operation(session_id, 1)
-            
-            # Should succeed after retries
-            assert result == "scraped_data_page_1"
-            assert len(operation_calls) == 3  # Failed twice, succeeded third time
-            
-            # All calls should have same session_id
-            for call_session_id, _ in operation_calls:
-                assert call_session_id == session_id
-            
-            # 4. Mark session as completed
-            session_info['status'] = 'completed'
-            session_info['pages_processed'] = 1
-            session_info['completion_timestamp'] = datetime.now().isoformat()
-            tracking_data[session_id] = session_info
-            save_session_tracking(tracking_data)
-            
-        except Exception as e:
-            # Mark session as failed
-            session_info['status'] = 'failed'
-            session_info['error'] = str(e)
-            tracking_data[session_id] = session_info
-            save_session_tracking(tracking_data)
-            raise
+        # 3. Record successful result
+        summary = {"rows": len(invoices), "csv": "collected_data/invoices_integration-test-2025-09-18.csv"}
+        record_result(idem_key, summary)
         
-        # 5. Verify final session state
-        final_data = load_session_tracking()
-        final_session = final_data[session_id]
+        # 4. Second run with same key - should replay
+        replayed_summary = maybe_replay(idem_key)
+        assert replayed_summary == summary
         
-        assert final_session['status'] == 'completed'
-        assert final_session['pages_processed'] == 1
-        assert 'completion_timestamp' in final_session
+        # Reset operation calls to verify no new scraping happens
+        operation_calls.clear()
         
-        # 6. Verify idempotency check
-        is_completed = check_session_completed(session_id)
-        assert is_completed == True
+        # Simulate second run (should not execute scraping)
+        cached_result = maybe_replay(idem_key)
+        assert cached_result == summary
+        assert len(operation_calls) == 0  # No new scraping calls
         
-        # 7. Verify that a new session would get a different ID
-        new_session_id = generate_session_id()
-        assert new_session_id != session_id
-        assert check_session_completed(new_session_id) == False
+        # 5. Test cache expiration
+        # Manually expire the cache entry
+        data = _idem_load()
+        data[idem_key]["ts"] = time.time() - (IDEM_TTL_SECONDS + 1)
+        _idem_save(data)
+        
+        # Should no longer replay
+        assert maybe_replay(idem_key) is None
+        
+        # 6. Verify different keys are independent
+        different_key = "different-job-key"
+        assert maybe_replay(different_key) is None
+        
+        record_result(different_key, {"rows": 99, "csv": "collected_data/invoices_different-job-key.csv"})
+        assert maybe_replay(different_key) == {"rows": 99, "csv": "collected_data/invoices_different-job-key.csv"}
+        
+        # Original expired key should still be None
+        assert maybe_replay(idem_key) is None
 
 
 if __name__ == "__main__":
