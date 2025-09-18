@@ -1,0 +1,7 @@
+invoice_id,customer,amount,paid_at,status
+Invoice2,Angie Block,$28186,28 Jan 2025,Partially Paid
+Invoice11,Clarence Yost,$28186,28 Jan 2025,Partially Paid
+Invoice16,Garnet,$384581,28 Jan 2025,Paid
+Invoice20,Angelica Schamberger,$28186,28 Jan 2025,Partially Paid
+Invoice23,Rory,$684857,28 Jan 2025,Partially Paid
+Invoice25,Domenick,$968553,28 Jan 2025,Partially Paid
